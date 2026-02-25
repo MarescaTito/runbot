@@ -110,13 +110,14 @@ def get_google_sheets_service():
         raise ValueError(f"Failed to create Google Sheets service: {e}")
 
 
-def extract_text_from_document(doc_content: Dict[str, Any]) -> str:
+def extract_text_from_document(doc_content: Dict[str, Any], tab_name: str | None = None) -> str:
     """
     Extract plain text from Google Docs document structure.
-    
+
     Args:
         doc_content: Document content from Google Docs API
-        
+        tab_name: The tab to read from, if None read entire document
+
     Returns:
         Plain text content of the document
     """
@@ -159,6 +160,12 @@ def extract_text_from_document(doc_content: Dict[str, Any]) -> str:
         return text
 
     full_text = ""
+    if tab_name:
+        for tab in doc_content.get('tabs'):
+            tab_title = tab.get('tabProperties', {}).get('title')
+            if tab_title == tab_name:
+                doc_content = tab.get('documentTab', {})
+                break
     body = doc_content.get('body', {})
     content_elements = body.get('content', [])
     

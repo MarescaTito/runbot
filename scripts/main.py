@@ -20,11 +20,12 @@ Windmill Variables Required (in f/run_club folder):
 - twilio_account_sid, twilio_auth_token, twilio_phone_number: For messaging
 - attendance_sheet_id: Google Sheets ID for attendance tracking (optional, for nudges)
 - allowed_bls: Comma-separated list of BL names to allow (optional, if not set all BLs are allowed)
+- bl_calendar_doc_id: Google Doc ID of BL calendar (optional, if not set uses LLM to get month's calendar)
 """
 
 import json
 import logging
-import re
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -69,7 +70,6 @@ def parse_simulated_time(simulated_time: str) -> datetime:
     else:
         naive_time = datetime.strptime(simulated_time, '%Y-%m-%d')
     return naive_time.replace(tzinfo=ZoneInfo("America/New_York"))
-
 
 def identify_calendar_doc(client: OpenAI, available_docs: List[Dict[str, Any]], current_time: datetime) -> Optional[str]:
     """Use LLM to identify which document is the calendar for the current month."""
@@ -1095,7 +1095,9 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
             logger.error("No Google Docs found")
             return 1
 
-        calendar_doc_id = identify_calendar_doc(client, available_docs, current_time)
+        calendar_doc_id_from_env = os.getenv("BL_CALENDAR_DOC_ID")
+        using_consolidated_doc = calendar_doc_id_from_env in available_docs
+        calendar_doc_id = calendar_doc_id_from_env if using_consolidated_doc else identify_calendar_doc(client, available_docs, current_time)
         if not calendar_doc_id:
             current_month = current_time.strftime('%B')
             current_year = current_time.strftime('%Y')
@@ -1103,8 +1105,10 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
             return 1
 
         docs_service = get_google_docs_service()
-        document = docs_service.documents().get(documentId=calendar_doc_id).execute()
-        calendar_text = extract_text_from_document(document)
+        document = docs_service.documents().get(documentId=calendar_doc_id, includeTabsContent=using_consolidated_doc).execute()
+        tab = current_time.strftime('%B') if using_consolidated_doc else None
+
+        calendar_text = extract_text_from_document(document, tab)
 
         # Fetch Action Network events first
         action_network_events = []
