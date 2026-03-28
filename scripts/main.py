@@ -1,31 +1,18 @@
 #!/usr/bin/env python3
-"""
-Ping Agent Script for BeauchBot - Windmill Compatible
 
-This script is designed to run as a Windmill workflow.
-It performs the following workflow for upcoming runs:
-1. Identify and read the calendar document
-2. Find runs happening within 3 hours
-3. Extract BLs for each run
-4. Match runs to Action Network events
-5. Fetch attendees from Action Network
-6. Check conversation history between BLs and attendees
-7. Send group messages to attendees (with BLs included)
-
-Windmill Variables Required (in f/run_club folder):
-- openai_api_key: OpenAI API key for the LLM
-- google_service_account_b64: Base64 encoded Google service account JSON
-- phone_directory_doc_id: Google Doc ID containing contact information
-- action_network_api_key: Action Network API key for event linking
-- twilio_account_sid, twilio_auth_token, twilio_phone_number: For messaging
-- attendance_sheet_id: Google Sheets ID for attendance tracking (optional, for nudges)
-- allowed_bls: Comma-separated list of BL names to allow (optional, if not set all BLs are allowed)
-- bl_calendar_doc_id: Google Doc ID of BL calendar (optional, if not set uses LLM to get month's calendar)
-"""
+#requirements:
+# openai-agents>=0.1.0
+# openai>=1.0.0
+# google-api-python-client>=2.147.0
+# google-auth>=2.35.0
+# requests>=2.31.0
+# twilio>=9.0.0
+# backoff>=2.2.1
+# wmill
 
 import json
 import logging
-import os
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -37,24 +24,24 @@ from openai import OpenAI
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from utils.config_utils import get_variable, require_variable
-from utils.twilio import get_all_messages_to_phone_number, send_text
-from utils.action_network_utils import (
+from f.running_club.config_utils import get_variable, require_variable
+from f.running_club.twilio import get_all_messages_to_phone_number, send_text
+from f.running_club.action_network_utils import (
     fetch_all_action_network_events,
     get_event_attendees,
     match_run_to_action_network_event,
 )
-from utils.attendance_utils import (
+from f.running_club.attendance_utils import (
     format_nudge_message,
     identify_nudge_candidates,
     parse_attendance_sheet,
 )
-from utils.google_utils import (
+from f.running_club.google_utils import (
     extract_text_from_document,
     get_google_docs_service,
     get_google_drive_service,
 )
-from utils.phone_utils import get_allowed_contacts, normalize_phone_number
+from f.running_club.phone_utils import get_allowed_contacts, normalize_phone_number
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,6 +57,7 @@ def parse_simulated_time(simulated_time: str) -> datetime:
     else:
         naive_time = datetime.strptime(simulated_time, '%Y-%m-%d')
     return naive_time.replace(tzinfo=ZoneInfo("America/New_York"))
+
 
 def identify_calendar_doc(client: OpenAI, available_docs: List[Dict[str, Any]], current_time: datetime) -> Optional[str]:
     """Use LLM to identify which document is the calendar for the current month."""
@@ -670,10 +658,10 @@ def format_attendee_message(attendee_name: str, bl_names: List[str], run_name: s
     run_time_str = run_datetime.strftime('%A, %B %d at %I:%M %p')
 
     message = (
-        f"Hello {first_name}! I've put you in a conversation with {bl_names_str} "
+        f"Hello {first_name}, I'm ComradeBot 🤖! I've put you in a conversation with {bl_names_str} "
         f"from DSA Running Club. It looks like you are signed up for {run_name} "
         f"on {run_time_str}. Are you still planning on attending? Also if you have "
-        f"any questions feel free to put them here and we'll help you out!"
+        f"any questions feel free to put them here and my human comrades will help you out!"
     )
 
     return message
@@ -701,23 +689,11 @@ def check_if_already_messaged_about_run(
     # Format the run time string exactly as it appears in our messages
     run_time_str = run_datetime.strftime('%A, %B %d at %I:%M %p')
 
-    # Search patterns for the messages we send
-    attendee_pattern_1 = f"signed up for {run_name}"
-    attendee_pattern_2 = f"on {run_time_str}"
-    bl_pattern = f"You are assigned to BL {run_name}"
-
     # Check the most recent messages (we only check the last 15)
     for msg in all_messages[:15]:
         body = msg.get('body', '')
 
-        # Check if this is an attendee message (both patterns must be present)
-        if attendee_pattern_1 in body and attendee_pattern_2 in body:
-            logger.debug(f"Found attendee message match for '{run_name}' on {run_time_str}")
-            return True
-
-        # Check if this is a BL message
-        if bl_pattern in body:
-            logger.debug(f"Found BL message match for '{run_name}'")
+        if run_name.lower() in body.lower() and run_time_str.lower() in body.lower():
             return True
 
     return False
@@ -799,6 +775,7 @@ def send_nudge_message_to_bls(
     bl_names: List[str],
     bl_phone_numbers: List[str],
     run_name: str,
+    run_time: datetime,
     nudge_candidates: List[Dict[str, Any]],
     invalid_bl_names: List[str],
     dry_run: bool
@@ -806,7 +783,7 @@ def send_nudge_message_to_bls(
     """Send nudge suggestions to BLs."""
     # Get attendance form link if available
     attendance_form_link = get_variable('attendance_form_link')
-    nudge_message = format_nudge_message(bl_names, run_name, nudge_candidates, attendance_form_link, invalid_bl_names)
+    nudge_message = format_nudge_message(bl_names, run_name, run_time, nudge_candidates, attendance_form_link, invalid_bl_names)
 
     try:
         if dry_run:
@@ -1037,7 +1014,7 @@ def process_action_network_event(
         validated_bl_names = [contact['name'] for contact in valid_bl_contacts]
         bl_phone_numbers = [contact['phone_number'] for contact in valid_bl_contacts]
 
-        send_nudge_message_to_bls(validated_bl_names, bl_phone_numbers, run_name, nudge_candidates, invalid_bl_names, dry_run)
+        send_nudge_message_to_bls(validated_bl_names, bl_phone_numbers, run_name, run_time, nudge_candidates, invalid_bl_names, dry_run)
 
     # Send messages to attendees
     if attendees and valid_bl_contacts:
@@ -1095,9 +1072,16 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
             logger.error("No Google Docs found")
             return 1
 
-        calendar_doc_id_from_env = os.getenv("BL_CALENDAR_DOC_ID")
-        using_consolidated_doc = calendar_doc_id_from_env in available_docs
+        calendar_doc_id_from_env = require_variable("bl_calendar_doc_id")
+        using_consolidated_doc = False
+        for doc in available_docs:
+            if(doc['id'] == calendar_doc_id_from_env):
+                using_consolidated_doc = True
+                break
+        logger.info("Using consolidated calendar: " + str(using_consolidated_doc))
+
         calendar_doc_id = calendar_doc_id_from_env if using_consolidated_doc else identify_calendar_doc(client, available_docs, current_time)
+
         if not calendar_doc_id:
             current_month = current_time.strftime('%B')
             current_year = current_time.strftime('%Y')
@@ -1121,7 +1105,7 @@ def run_cron_execution(simulated_time: Optional[str] = None, dry_run: bool = Fal
             return 1
 
         # Filter Action Network events by time window
-        applicable_hours = 10
+        applicable_hours = int(require_variable("lookback_hours"))
         filtered_events = filter_action_network_events_by_time_window(
             action_network_events, current_time, hours=applicable_hours
         )
@@ -1198,7 +1182,7 @@ def main(
     eastern_tz = ZoneInfo("America/New_York")
     now = parse_simulated_time(simulate_time) if simulate_time else datetime.now(eastern_tz)
 
-    if now.hour < 8 or now.hour >= 20:
+    if now.hour < 9 or now.hour >= 22:
         logger.info(f"Outside operating hours (8 AM - 8 PM). Current hour: {now.hour}")
         return 0
 
