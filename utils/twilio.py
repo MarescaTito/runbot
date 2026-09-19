@@ -13,22 +13,19 @@ import logging
 import re
 from typing import List, Dict, Any
 
-# OpenAI Agents
-from agents import function_tool
-
 # Twilio
 from twilio.rest import Client
+from twilio.base.exceptions import TwilioRestException
 
 # Import shared utilities
-from utils.config_utils import require_variable
-from utils.phone_utils import validate_phone_numbers_against_contacts, format_contact_list_for_error, normalize_phone_number
+from f.running_club.config_utils import require_variable
+from f.running_club.phone_utils import normalize_phone_number
 
 logger = logging.getLogger(__name__)
 
 # Reduce Twilio logging verbosity
 logging.getLogger('twilio').setLevel(logging.WARNING)
 logging.getLogger('twilio.http_client').setLevel(logging.WARNING)
-
 
 def get_twilio_client():
     """Initialize and return a Twilio client using configuration variables."""
@@ -104,7 +101,7 @@ def send_text(to_numbers: List[str], message: str) -> Dict[str, Any]:
 
         client = get_twilio_client()
         from_number = get_twilio_phone_number()
-        
+
         # Determine if this is individual or group messaging based on recipient count
         if len(normalized_numbers) == 1:
             # Individual messaging using standard SMS
@@ -112,11 +109,11 @@ def send_text(to_numbers: List[str], message: str) -> Dict[str, Any]:
         else:
             # Group messaging using Group MMS
             return _send_group_text(client, from_number, normalized_numbers, message)
-            
+
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
         return {"error": str(e)}
-    
+
     except Exception as e:
         logger.error(f"Error sending text: {e}")
         return {"error": f"Failed to send text: {str(e)}"}
@@ -127,14 +124,14 @@ def send_text(to_numbers: List[str], message: str) -> Dict[str, Any]:
 
 def _send_individual_text(client, from_number: str, to_number: str, message: str) -> Dict[str, Any]:
     """Send individual SMS message."""
-    
+
     # Send SMS using standard Twilio messaging
     message_result = client.messages.create(
         body=message,
         from_=from_number,
         to=to_number
     )
-    
+
     response = {
         "type": "individual",
         "message_sid": message_result.sid,
@@ -144,192 +141,101 @@ def _send_individual_text(client, from_number: str, to_number: str, message: str
         "status": message_result.status,
         "date_created": message_result.date_created.isoformat() if message_result.date_created else None
     }
-    
+
     logger.info(f"Individual SMS sent to {to_number}, Message: {message_result.sid}")
     return response
 
 
-def _find_existing_group_conversation(client, target_participants: List[str]) -> Dict[str, Any]:
-    """Find an existing Group MMS conversation with the same participants."""
-    try:
-        # Get recent conversations to check
-        conversations = client.conversations.v1.conversations.list(limit=50)
-        
-        # Convert target participants to a set for comparison
-        target_set = set(target_participants)
-        
-        for conversation in conversations:
-            try:
-                # Skip if conversation is not active
-                if conversation.state != 'active':
-                    continue
-                
-                # Get participants for this conversation
-                participants = client.conversations.v1.conversations(conversation.sid).participants.list()
-                
-                # Extract phone numbers from participants
-                participant_numbers = set()
-                business_participant = None
-                
-                for participant in participants:
-                    if participant.messaging_binding:
-                        # SMS participant - has address
-                        if hasattr(participant.messaging_binding, 'address') and participant.messaging_binding.address:
-                            participant_numbers.add(participant.messaging_binding.address)
-                        elif isinstance(participant.messaging_binding, dict) and participant.messaging_binding.get('address'):
-                            participant_numbers.add(participant.messaging_binding['address'])
-                    
-                    # Track business participant
-                    if participant.identity == "beauchbot_assistant":
-                        business_participant = participant
-
-                # Check if this conversation has the same SMS participants
-                if participant_numbers == target_set:
-                    logger.info(f"Found matching conversation: {conversation.sid}")
-                    return {
-                        "sid": conversation.sid,
-                        "friendly_name": conversation.friendly_name,
-                        "participants": list(participant_numbers),
-                        "business_participant": business_participant.sid if business_participant else None
-                    }
-                    
-            except Exception as e:
-                logger.warning(f"Error checking conversation {conversation.sid}: {e}")
-                continue
-        
-        logger.info("No existing conversation found with matching participants")
-        return None
-        
-    except Exception as e:
-        logger.error(f"Error finding existing group conversation: {e}")
-        return None
-
-
 def _send_group_text(client, from_number: str, to_numbers: List[str], message: str) -> Dict[str, Any]:
-    """Send Group MMS message using Conversations API."""
+    """Send Group MMS message using Conversations API, handling duplicates natively."""
     try:
         # Validate US/Canada numbers (Group MMS requirement)
         for phone_number in to_numbers:
             if not phone_number.startswith('+1'):
                 return {"error": f"Group MMS only supports US/Canada (+1) numbers. Invalid: {phone_number}"}
-        
-        # Check if there's already an existing conversation with the same participants
-        existing_conversation = _find_existing_group_conversation(client, to_numbers)
-        
-        if existing_conversation:
-            logger.info(f"Found existing Group MMS conversation: {existing_conversation['sid']}")
-            
-            # Ensure beauchbot_assistant participant exists in the conversation
-            try:
-                # Check if beauchbot_assistant is already a participant
-                participants = client.conversations.v1.conversations(existing_conversation['sid']).participants.list()
-                beauchbot_participant_exists = any(p.identity == "beauchbot_assistant" for p in participants)
-                
-                if not beauchbot_participant_exists:
-                    logger.info("Adding beauchbot_assistant participant to existing conversation")
-                    # Add beauchbot_assistant as chat participant
-                    client.conversations.v1.conversations(existing_conversation['sid']).participants.create(
-                        identity="beauchbot_assistant",
-                        messaging_binding_projected_address=from_number
-                    )
-                
-                # Now send the message
-                message_result = client.conversations.v1.conversations(existing_conversation['sid']).messages.create(
-                    body=message,
-                    author="beauchbot_assistant"
-                )
-                
-                response = {
-                    "type": "group",
-                    "conversation_sid": existing_conversation['sid'],
-                    "message_sid": message_result.sid,
-                    "reused_existing": True,
-                    "existing_participants": existing_conversation['participants'],
-                    "body": message,
-                    "date_created": message_result.date_created.isoformat() if message_result.date_created else None
-                }
-                
-                logger.info(f"Group MMS sent to existing conversation: {existing_conversation['sid']}, Message: {message_result.sid}")
-                return response
-                
-            except Exception as e:
-                logger.error(f"Failed to send message to existing conversation: {e}")
-                # Fall back to creating a new conversation
-                logger.info("Falling back to creating new conversation...")
 
-        # Create new conversation
-        logger.info(f"Creating new Group MMS conversation with {len(to_numbers)} participants")
-        
-        # Create conversation
-        conversation = client.conversations.v1.conversations.create(
-            friendly_name=f"Group conversation {len(to_numbers)} participants"
-        )
-        
-        # Add SMS participants using Group MMS setup (no proxy address)
-        participants_added = []
-        participants_failed = []
-        
-        for to_number in to_numbers:
-            try:
-                # Group MMS: SMS participants have ONLY address, NO proxy address
-                participant = client.conversations.v1.conversations(conversation.sid).participants.create(
-                    messaging_binding_address=to_number
+        # Inline helper to handle sending to an verified existing conversation SID
+        def send_to_existing(conversation_sid: str) -> Dict[str, Any]:
+            # Ensure beauchbot_assistant participant exists in the conversation
+            participants = client.conversations.v1.conversations(conversation_sid).participants.list()
+            beauchbot_participant_exists = any(p.identity == "beauchbot_assistant" for p in participants)
+
+            if not beauchbot_participant_exists:
+                logger.info(f"Adding beauchbot_assistant participant to existing conversation {conversation_sid}")
+                client.conversations.v1.conversations(conversation_sid).participants.create(
+                    identity="beauchbot_assistant",
+                    messaging_binding_projected_address=from_number
                 )
-                
-                participants_added.append({
-                    "phone_number": to_number,
-                    "participant_sid": participant.sid
-                })
-                
-            except Exception as e:
-                logger.error(f"Failed to add participant {to_number}: {e}")
-                participants_failed.append({
-                    "phone_number": to_number,
-                    "error": str(e)
-                })
-        
-        # Add business chat participant with projected address
-        try:
-            chat_participant = client.conversations.v1.conversations(conversation.sid).participants.create(
-                identity="beauchbot_assistant",
-                messaging_binding_projected_address=from_number
-            )
-            
-            participants_added.append({
-                "phone_number": f"BeauchBot (projected: {from_number})",
-                "participant_sid": chat_participant.sid
-            })
-            
-        except Exception as e:
-            logger.error(f"Failed to add chat participant: {e}")
-            participants_failed.append({
-                "phone_number": "BeauchBot",
-                "error": str(e)
-            })
-        
-        # Send the message as BeauchBot
-        if len(participants_added) > 0:
-            message_result = client.conversations.v1.conversations(conversation.sid).messages.create(
+
+            message_result = client.conversations.v1.conversations(conversation_sid).messages.create(
                 body=message,
                 author="beauchbot_assistant"
             )
-            
-            response = {
+            return {
                 "type": "group",
-                "conversation_sid": conversation.sid,
+                "conversation_sid": conversation_sid,
                 "message_sid": message_result.sid,
-                "reused_existing": False,
-                "participants_added": participants_added,
-                "participants_failed": participants_failed,
+                "reused_existing": True,
                 "body": message,
                 "date_created": message_result.date_created.isoformat() if message_result.date_created else None
             }
-            
-            logger.info(f"Group MMS sent successfully to conversation: {conversation.sid}, Message: {message_result.sid}")
-            return response
-        else:
-            return {"error": "Failed to add any participants to the group conversation"}
-            
+
+        # --- OPTIMISTIC CREATION FLOW ---
+        # Instead of an expensive scan loop, we try building the room immediately.
+        logger.info(f"Initiating Group MMS conversation creation candidate with {len(to_numbers)} participants")
+        conversation = client.conversations.v1.conversations.create(
+            friendly_name=f"Group conversation {len(to_numbers)} participants"
+        )
+
+        # Add SMS participants
+        for to_number in to_numbers:
+            client.conversations.v1.conversations(conversation.sid).participants.create(
+                messaging_binding_address=to_number
+            )
+
+        # Add business chat participant (This triggers Twilio's Group MMS validation)
+        try:
+            client.conversations.v1.conversations(conversation.sid).participants.create(
+                identity="beauchbot_assistant",
+                messaging_binding_projected_address=from_number
+            )
+        except TwilioRestException as e:
+            # Check if this configuration already exists somewhere else
+            if e.status == 409 and "already exists as Conversation" in str(e):
+                # Regex match for a standard Twilio Conversation SID (starts with CH followed by 32 hex chars)
+                match = re.search(r'CH[a-f0-9]{32}', str(e))
+                if match:
+                    existing_sid = match.group(0)
+                    logger.info(f"Twilio 409 intercepted. Existing conversation mapped to: {existing_sid}")
+
+                    # Clean up the broken shell conversation we just initialized
+                    try:
+                        conversation.delete()
+                    except Exception as delete_err:
+                        logger.warning(f"Failed to clean up temporary stub {conversation.sid}: {delete_err}")
+
+                    # Seamlessly pivot and send via the pre-existing conversation room
+                    return send_to_existing(existing_sid)
+
+            # If it's a different variety of Twilio exception, bubble it up
+            raise e
+
+        # If the creation succeeded perfectly without conflicts, deliver the message here
+        message_result = client.conversations.v1.conversations(conversation.sid).messages.create(
+            body=message,
+            author="beauchbot_assistant"
+        )
+
+        logger.info(f"Group MMS sent successfully to new conversation: {conversation.sid}")
+        return {
+            "type": "group",
+            "conversation_sid": conversation.sid,
+            "message_sid": message_result.sid,
+            "reused_existing": False,
+            "body": message,
+            "date_created": message_result.date_created.isoformat() if message_result.date_created else None
+        }
+
     except Exception as e:
         logger.error(f"Error sending group text: {e}")
         return {"error": f"Failed to send group text: {str(e)}"}
@@ -363,13 +269,10 @@ def get_all_messages_to_phone_number(phone_number: str, limit: int = 20) -> List
         all_messages = []
 
         # Search through recent conversations to find ones that include this phone number
-        conversations = client.conversations.v1.conversations.list(limit=100)
+        conversations = client.conversations.v1.conversations.list(state='active')
 
         for conversation in conversations:
             try:
-                if conversation.state != 'active':
-                    continue
-
                 # Get participants for this conversation
                 participants = client.conversations.v1.conversations(conversation.sid).participants.list()
 

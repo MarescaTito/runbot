@@ -18,7 +18,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 # Import utilities
-from utils.config_utils import require_variable
+from f.running_club.config_utils import require_variable
 
 logger = logging.getLogger(__name__)
 
@@ -178,69 +178,3 @@ def extract_text_from_document(doc_content: Dict[str, Any], tab_name: str | None
             full_text += "\n---\n"  # Section break
     
     return full_text.strip()
-
-    """
-    Fetch the system prompt from a Google Doc.
-    
-    Reads the document ID from SYSTEM_PROMPT_DOC_ID environment variable.
-    
-    Returns:
-        The system prompt text from the specified Google Doc
-        
-    Raises:
-        ValueError: If SYSTEM_PROMPT_DOC_ID is not set or document cannot be accessed
-    """
-    system_prompt_doc_id = os.getenv('SYSTEM_PROMPT_DOC_ID')
-    
-    if not system_prompt_doc_id:
-        raise ValueError(
-            "SYSTEM_PROMPT_DOC_ID environment variable is required. "
-            "Please set it to the ID of your system prompt Google Document."
-        )
-    
-    try:
-        logger.info(f"Fetching system prompt from Google Doc: {system_prompt_doc_id}")
-        
-        # Get Google Docs service
-        docs_service = get_google_docs_service()
-        
-        # Retrieve the document
-        document = docs_service.documents().get(documentId=system_prompt_doc_id).execute()
-        
-        # Extract text content
-        text_content = extract_text_from_document(document)
-        
-        if not text_content.strip():
-            raise ValueError(f"System prompt document (ID: {system_prompt_doc_id}) is empty. Please add content to the document.")
-        
-        logger.info("Successfully loaded system prompt from Google Doc")
-        return text_content.strip()
-        
-    except HttpError as e:
-        error_details = json.loads(e.content.decode()) if hasattr(e, 'content') else {}
-        error_message = error_details.get('error', {}).get('message', 'Unknown error')
-        
-        if e.resp.status == 403:
-            raise ValueError(
-                f"Access denied to system prompt document (ID: {system_prompt_doc_id}). "
-                f"Make sure the service account has permission to read the document. "
-                f"Details: {error_message}"
-            )
-        elif e.resp.status == 404:
-            raise ValueError(
-                f"System prompt document not found (ID: {system_prompt_doc_id}). "
-                f"Please check the SYSTEM_PROMPT_DOC_ID environment variable. "
-                f"Details: {error_message}"
-            )
-        else:
-            raise ValueError(
-                f"Google API error accessing system prompt document: {error_message} "
-                f"(status {e.resp.status})"
-            )
-    
-    except ValueError:
-        # Re-raise ValueError exceptions (our custom ones and Google API ones)
-        raise
-    
-    except Exception as e:
-        raise ValueError(f"Unexpected error loading system prompt: {str(e)}")

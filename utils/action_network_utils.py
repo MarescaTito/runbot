@@ -15,8 +15,8 @@ from typing import List, Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 # Import utilities
-from utils.config_utils import require_variable
-from utils.phone_utils import normalize_phone_number
+from f.running_club.config_utils import require_variable
+from f.running_club.phone_utils import normalize_phone_number
 
 # Action Network API base URL
 ACTION_NETWORK_API_BASE = "https://actionnetwork.org/api"
@@ -120,6 +120,7 @@ def fetch_all_action_network_events(max_pages: int = 3) -> List[Dict[str, Any]]:
 
     while page <= max_pages:
         try:
+            previous_len = len(all_events)
             data = fetch_action_network_events(page=page)
 
             # Extract events from the embedded data
@@ -129,8 +130,13 @@ def fetch_all_action_network_events(max_pages: int = 3) -> List[Dict[str, Any]]:
                 logger.info(f"✅ No more events on page {page}, stopping")
                 break
 
-            all_events.extend(events)
-            logger.info(f"   Added {len(events)} events from page {page}")
+            for event in events:
+                if not event.get("status") == "cancelled":
+                    all_events.append(event)
+                else:
+                    logger.info("Skipping cancelled event " + event.get('title'))
+
+            logger.info(f"   Added {len(all_events) - previous_len} events from page {page}")
 
             # Check if there are more pages
             total_pages = data.get('total_pages', 0)
@@ -603,12 +609,8 @@ def get_event_attendees(event_id: str, max_attendances: int = 250) -> List[Dict[
 
             # Log attendee info
             name = person_details.get('full_name', 'Unknown')
-            email = person_details.get('primary_email', 'N/A')
-            phone = person_details.get('primary_phone', 'N/A')
 
             logger.info(f"      {i}. {name}")
-            logger.info(f"         Email: {email}")
-            logger.info(f"         Phone: {phone}")
 
     logger.info(f"✅ Retrieved {len(attendees)} attendee details")
     return attendees
